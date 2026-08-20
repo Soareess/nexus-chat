@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#1e1f22" />
+<title>Nexus Chat</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%235865f2'/><text y='68' x='50' text-anchor='middle' font-size='48' font-family='sans-serif' fill='white'>N</text></svg>" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ------------------------------------------------------- tela de entrada -->
+<div id="login" class="login">
+  <div class="login-card">
+    <div class="login-logo">N</div>
+    <h1>Nexus Chat</h1>
+    <p class="login-sub">Voz, video e tela compartilhada direto entre voce e seus amigos.</p>
+
+    <label class="field">
+      <span>Como voce quer ser chamado</span>
+      <input id="loginName" maxlength="24" placeholder="Seu apelido" autocomplete="nickname" />
+    </label>
+
+    <label class="field">
+      <span>Cor do perfil</span>
+      <div id="colorRow" class="color-row"></div>
+    </label>
+
+    <details class="adv" id="advBox">
+      <summary>Servidor de conexao</summary>
+      <input id="signalUrl" placeholder="https://meu-servidor.onrender.com" autocomplete="off" />
+      <span class="adv-hint" id="signalHint"></span>
+    </details>
+
+    <button id="loginBtn" class="btn-primary">Entrar</button>
+    <p class="login-hint" id="loginHint"></p>
+  </div>
+</div>
+
+<!-- --------------------------------------------------------------- app -->
+<div id="app" class="app hidden">
+
+  <!-- rail de servidores -->
+  <nav class="rail" id="rail"></nav>
+
+  <!-- sidebar de canais -->
+  <aside class="sidebar">
+    <header class="sidebar-head"><span id="guildName">Servidor</span></header>
+
+    <div class="channels" id="channels">
+      <div class="cat">Canais de texto</div>
+      <div id="textChannels"></div>
+      <div class="cat">Canais de voz</div>
+      <div id="voiceChannels"></div>
+    </div>
+
+    <div class="voice-status hidden" id="voiceStatus">
+      <div class="vs-line">
+        <span class="vs-dot"></span>
+        <div>
+          <div class="vs-title">Voz conectada</div>
+          <div class="vs-sub" id="vsChannel">—</div>
+        </div>
+        <button class="vs-hang" id="btnHangSmall" title="Desconectar">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 9c-1.6 0-3.15.25-4.6.7v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28a.98.98 0 0 1-.7-.29L.29 13.08a.98.98 0 0 1-.29-.7c0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .27-.11.52-.29.7l-2.48 2.46c-.18.18-.43.29-.7.29-.27 0-.52-.11-.7-.28a11.27 11.27 0 0 0-2.67-1.85.998.998 0 0 1-.56-.9v-3.1C15.15 9.25 13.6 9 12 9Z"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="me-bar">
+      <div class="avatar" id="meAvatar">?</div>
+      <div class="me-info">
+        <div class="me-name" id="meName">—</div>
+        <div class="me-tag">online</div>
+      </div>
+      <button class="ic" id="btnMic" title="Microfone (Ctrl+M)"></button>
+      <button class="ic" id="btnDeaf" title="Silenciar tudo (Ctrl+D)"></button>
+    </div>
+  </aside>
+
+  <!-- area principal -->
+  <main class="main">
+    <header class="topbar">
+      <span class="topbar-hash">#</span>
+      <span id="channelTitle">geral</span>
+      <div class="topbar-right">
+        <button class="ghost" id="btnToggleChat" title="Mostrar/ocultar chat">Chat</button>
+        <button class="ghost" id="btnMembers" title="Membros">Membros</button>
+      </div>
+    </header>
+
+    <div class="stage-wrap">
+      <!-- palco de video / tela -->
+      <section class="stage hidden" id="stage">
+        <div class="stage-grid" id="stageGrid"></div>
+
+        <div class="controls" id="controls">
+          <button class="cbtn" id="cMic"><span class="ci" data-i="mic"></span><em>Mic</em></button>
+          <button class="cbtn" id="cCam"><span class="ci" data-i="cam"></span><em>Camera</em></button>
+          <button class="cbtn accent" id="cScreen"><span class="ci" data-i="screen"></span><em>Tela</em></button>
+          <button class="cbtn" id="cFull"><span class="ci" data-i="full"></span><em>Tela cheia</em></button>
+          <button class="cbtn danger" id="cHang"><span class="ci" data-i="hang"></span><em>Sair</em></button>
+        </div>
+      </section>
+
+      <!-- chat -->
+      <section class="chat" id="chat">
+        <div class="messages" id="messages"></div>
+        <div class="typing" id="typing"></div>
+        <form class="composer" id="composer">
+          <input id="msgInput" maxlength="2000" placeholder="Conversar em #geral" autocomplete="off" />
+          <button type="submit" class="send" title="Enviar">
+            <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+          </button>
+        </form>
+      </section>
+
+      <!-- membros -->
+      <aside class="members" id="members">
+        <div class="cat">Online — <span id="memberCount">0</span></div>
+        <div id="memberList"></div>
+      </aside>
+    </div>
+  </main>
+</div>
+
+<div id="toasts" class="toasts"></div>
+
+<!-- modal de qualidade da tela -->
+<div class="modal hidden" id="shareModal">
+  <div class="modal-card">
+    <h2>Compartilhar tela</h2>
+    <p class="modal-sub">Escolha a qualidade. Quanto maior, mais banda de upload usa.</p>
+    <div class="opt-row" id="qualityRow">
+      <button class="opt" data-q="720p30">720p 30fps</button>
+      <button class="opt selected" data-q="1080p30">1080p 30fps</button>
+      <button class="opt" data-q="1080p60">1080p 60fps</button>
+      <button class="opt" data-q="source">Original</button>
+    </div>
+    <label class="check"><input type="checkbox" id="shareAudio" checked /> <span>Incluir audio do sistema (aba/janela)</span></label>
+    <div class="modal-actions">
+      <button class="btn-ghost" id="shareCancel">Cancelar</button>
+      <button class="btn-primary" id="shareGo">Compartilhar</button>
+    </div>
+  </div>
+</div>
+
+<script src="vendor/socket.io.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

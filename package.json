@@ -1,0 +1,19 @@
+{
+  "name": "nexus-chat",
+  "version": "1.0.0",
+  "description": "Plataforma de voz, video e compartilhamento de tela estilo Discord",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "cert": "node scripts/gen-cert.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
