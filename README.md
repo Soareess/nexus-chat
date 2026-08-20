@@ -4,6 +4,8 @@ Plataforma de voz, vídeo e **compartilhamento de tela** no estilo Discord — s
 
 Áudio, câmera e tela vão **direto de um navegador para o outro** (WebRTC). O servidor só faz a apresentação entre as pessoas e guarda o chat.
 
+**No ar:** https://nexus-chat-soareess-projects.vercel.app
+
 ---
 
 ## 1. Rodar na sua máquina
@@ -44,59 +46,59 @@ npx localtunnel --port 3000
 
 Ele devolve uma URL `https://...loca.lt` — mande para os amigos. (`ngrok http 3000` e `cloudflared tunnel --url http://localhost:3000` funcionam igual.)
 
+Mas o mais simples é usar a URL já publicada — veja **Deploy** abaixo.
+
 **Opção definitiva (deploy):** ver a seção abaixo.
 
 ---
 
-## Deploy: Vercel + Render
+## Deploy
 
-O Vercel **não mantém WebSocket aberto** (funções serverless não vivem entre requisições), então ele não consegue hospedar a sinalização do Socket.IO. A divisão que funciona:
+O projeto já está publicado no Vercel: a interface **e** a sinalização rodam no mesmo deploy.
 
-| Parte | Onde | Por quê |
+O Vercel passou a suportar WebSocket em Functions (Fluid compute), então `api/socket-io.js` sobe como função WebSocket em `/api/socket-io` e `api/config.js` responde em `/ice` dizendo ao cliente onde conectar. Nada extra para configurar — todo push na `main` vira um deploy novo.
+
+### Limites do WebSocket no Vercel
+
+| Limite | O que acontece | Como fica |
 |---|---|---|
-| Interface (HTML/CSS/JS) | **Vercel** | CDN rápido, HTTPS automático |
-| Sinalização (Socket.IO) | **Render** (free) | aceita conexão WebSocket persistente |
-| Áudio / vídeo / tela | **P2P** entre os navegadores | não passa por servidor nenhum |
+| A função tem duração máxima (`maxDuration: 300`) | o WebSocket cai a cada ~5 min | o cliente reconecta e **volta sozinho para a call**; a mídia é P2P, então a conversa em andamento não cai junto |
+| Uma reconexão pode cair em outra instância | quem reconectar primeiro pode não enxergar quem ainda está na instância antiga | some sozinho quando todos reconectam; num grupo pequeno é raro incomodar |
+| Estado (usuários, chat) fica em memória | reciclou a função, o histórico do chat some | as chamadas e a presença se refazem sozinhas |
 
-### 1. Servidor de sinalização no Render
+Para calls longas ou grupos maiores, vale um servidor dedicado — sem limite de duração e com estado estável.
 
-1. [render.com](https://render.com) → **New → Web Service** → conecte este repositório.
-2. O `render.yaml` já define tudo (build `npm install`, start `npm start`, plano free).
-3. Copie a URL final, algo como `https://nexus-chat-xxxx.onrender.com`.
+### Servidor dedicado (opcional)
 
-> O plano free hiberna após 15 min sem uso; a primeira conexão depois disso demora ~30s para acordar.
+1. [render.com](https://render.com) → **New → Blueprint** → aponte para este repositório (o `render.yaml` já traz build, start e health check no plano free).
+2. Copie a URL, ex.: `https://nexus-chat-xxxx.onrender.com`.
+3. No Vercel, defina a variável `SIGNAL_URL` com essa URL e refaça o deploy.
 
-### 2. Interface no Vercel
-
-No projeto do Vercel, adicione a variável de ambiente e faça redeploy:
+Sem mexer em variável, dá para apontar pela própria URL:
 
 ```
-SIGNAL_URL = https://nexus-chat-xxxx.onrender.com
+https://nexus-chat-soareess-projects.vercel.app/?signal=https://nexus-chat-xxxx.onrender.com
 ```
 
-Opcionalmente, `TURN_URL`, `TURN_USER` e `TURN_PASS`.
+O endereço fica salvo no navegador e também pode ser editado em *Servidor de conexão*, na tela de entrada.
 
-**Sem querer mexer em variável?** Dá para passar o servidor pela URL:
+> O plano free do Render hiberna após 15 min parado; a primeira conexão depois disso leva ~30s para acordar.
 
-```
-https://seu-app.vercel.app/?signal=https://nexus-chat-xxxx.onrender.com
-```
-
-O endereço fica salvo no navegador, e também dá para editá-lo em *Servidor de conexão* na tela de entrada.
-
-### Alternativa: tudo num lugar só
+### Tudo num lugar só
 
 O `server.js` serve a interface **e** a sinalização. Subindo só no Render (ou Railway/Fly), a URL dele já é a plataforma inteira — sem Vercel, sem `SIGNAL_URL`.
 
-### TURN (importante para internet)
+### TURN (redes difíceis)
 
-Em redes normais o P2P se resolve com STUN. Em NAT simétrico (algumas operadoras, 4G, redes corporativas) a conexão só fecha com um servidor TURN. Configure por variáveis de ambiente:
+Em rede normal o P2P se resolve com STUN. Em NAT simétrico (algumas operadoras, 4G, rede corporativa) a conexão só fecha com TURN. No Vercel ou no servidor próprio, defina:
 
-```bash
-TURN_URL=turn:seu-servidor:3478 TURN_USER=usuario TURN_PASS=senha npm start
+```
+TURN_URL=turn:seu-servidor:3478
+TURN_USER=usuario
+TURN_PASS=senha
 ```
 
-Serviços prontos: Metered, Twilio Network Traversal, Cloudflare Calls. Ou suba um `coturn` num VPS.
+Serviços prontos: Metered, Twilio Network Traversal, Cloudflare Calls. Ou um `coturn` num VPS.
 
 ---
 
@@ -123,9 +125,11 @@ public/app.js       -> UI + malha WebRTC (negociacao perfeita, sem glare)
 public/style.css    -> tema escuro estilo Discord
 public/vendor/       -> cliente socket.io (servido junto, funciona sem backend na mesma origem)
 server.js           -> Express + Socket.IO: salas, chat, sinalizacao, /ice
-api/config.js       -> funcao serverless do Vercel: devolve SIGNAL_URL + ICE
-vercel.json         -> front estatico + rewrite /ice -> /api/config
-render.yaml         -> blueprint do servidor de sinalizacao
+lib/signaling.js    -> salas, chat e sinalizacao (usado pelos dois backends)
+api/socket-io.js    -> a mesma sinalizacao como Vercel Function WebSocket
+api/config.js       -> /ice no Vercel: ICE servers, path do socket e SIGNAL_URL
+vercel.json         -> front estatico + function + rewrite /ice -> /api/config
+render.yaml         -> blueprint do servidor dedicado
 scripts/gen-cert.js -> certificado autoassinado (HTTPS local)
 ```
 
@@ -136,4 +140,4 @@ scripts/gen-cert.js -> certificado autoassinado (HTTPS local)
 
 ## Personalizar servidores e canais
 
-Edite `DEFAULT_SERVERS` no topo de `server.js` — nome, ícone (2 letras), canais de texto e de voz.
+Edite `DEFAULT_SERVERS` no topo de `lib/signaling.js` — nome, ícone (2 letras), canais de texto e de voz.
