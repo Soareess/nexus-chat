@@ -52,6 +52,7 @@ const state = {
 */
 let socket = null;
 let signalOrigin = '';
+let socketOpts = { transports: ['websocket', 'polling'] };
 
 function paramSignal() {
   try { return new URL(location.href).searchParams.get('signal') || ''; } catch (_) { return ''; }
@@ -64,15 +65,23 @@ async function loadConfig() {
     if (r.ok) cfg = await r.json();
   } catch (_) { /* sem backend na mesma origem */ }
   if (cfg && Array.isArray(cfg.iceServers) && cfg.iceServers.length) ICE.iceServers = cfg.iceServers;
-  return (paramSignal() || localStorage.getItem('nexus:signal') || cfg.signalUrl || '').replace(/\/+$/, '');
+
+  const chosen = (paramSignal() || localStorage.getItem('nexus:signal') || cfg.signalUrl || '').replace(/\/+$/, '');
+  socketOpts = {
+    transports: chosen ? ['websocket', 'polling'] : (cfg.transports || ['websocket', 'polling'])
+  };
+  // o path so vale para a mesma origem; servidor externo usa o padrao
+  if (!chosen && cfg.socketPath) socketOpts.path = cfg.socketPath;
+  return chosen;
 }
 
 function connect(url) {
   signalOrigin = url || '';
   if (signalOrigin) localStorage.setItem('nexus:signal', signalOrigin);
-  socket = signalOrigin
-    ? io(signalOrigin, { transports: ['websocket', 'polling'] })
-    : io({ transports: ['websocket', 'polling'] });
+  else localStorage.removeItem('nexus:signal');
+  const opts = { ...socketOpts };
+  if (signalOrigin) { delete opts.path; opts.transports = ['websocket', 'polling']; }
+  socket = signalOrigin ? io(signalOrigin, opts) : io(opts);
   bindSocketEvents();
 }
 

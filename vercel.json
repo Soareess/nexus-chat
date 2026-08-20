@@ -2,7 +2,6 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": null,
   "buildCommand": null,
-  "installCommand": "echo \"sem build: front estatico + funcao serverless\"",
   "outputDirectory": "public",
   "rewrites": [
     {
@@ -20,5 +19,10 @@
         }
       ]
     }
-  ]
+  ],
+  "functions": {
+    "api/socket-io.js": {
+      "maxDuration": 300
+    }
+  }
 }
