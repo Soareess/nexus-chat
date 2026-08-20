@@ -51,14 +51,20 @@ const state = {
      1. ?signal=https://...   2. o que foi salvo no navegador
      3. o que o backend devolve em /ice   4. mesma origem
 */
-// Identidade fixa da pessoa (nao muda quando o socket cai e volta).
+// Identidade da sessao: nao muda quando o socket cai e volta (e por isso a
+// call sobrevive), mas e por ABA - duas abas do mesmo navegador sao duas
+// pessoas diferentes, como seria de esperar.
 const clientId = (() => {
-  let id = localStorage.getItem('nexus:cid');
-  if (!id) {
-    id = (crypto.randomUUID ? crypto.randomUUID() : Date.now() + '-' + Math.random().toString(36).slice(2));
-    localStorage.setItem('nexus:cid', id);
+  const novo = () => (crypto.randomUUID
+    ? crypto.randomUUID()
+    : Date.now() + '-' + Math.random().toString(36).slice(2));
+  try {
+    let id = sessionStorage.getItem('nexus:cid');
+    if (!id) { id = novo(); sessionStorage.setItem('nexus:cid', id); }
+    return id;
+  } catch (_) {
+    return novo();
   }
-  return id;
 })();
 
 let socket = null;
@@ -1089,7 +1095,9 @@ socket.on('connect', () => {
   // Reentra com o MESMO clientId: o servidor devolve a call em que a pessoa
   // estava e as conexoes P2P que ja existem seguem intactas - a tela nao pisca.
   const back = state.lastVoiceChannel;
-  socket.emit('join', { clientId, name: state.me.name, color: state.me.color, guildId: state.guild.id }, (data) => {
+  // reentra com o id que o servidor confirmou (pode ter sido ajustado por
+  // colisao de identidade), para os outros continuarem reconhecendo a gente
+  socket.emit('join', { clientId: state.me.id || clientId, name: state.me.name, color: state.me.color, guildId: state.guild.id }, (data) => {
     applyJoin(data, { keepCall: true });
     state.lastVoiceChannel = back || state.voiceChannel;
     resumeVoice(data.voice, back);
