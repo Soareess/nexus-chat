@@ -33,6 +33,7 @@ const state = {
   speaking: new Set(),       // ids falando
   textChannel: null,
   voiceChannel: null,
+  lastVoiceChannel: null,     // para voltar sozinho depois de uma reconexao
   peers: new Map(),          // peerId -> Peer
   remote: new Map(),         // peerId -> { mic, cam, screen } MediaStream
   pendingKind: new Map(),    // streamId -> kind (meta chegou antes da track)
@@ -230,6 +231,7 @@ function renderRail() {
 function switchGuild(id) {
   if (id === state.guild.id) return;
   socket.emit('guild:switch', { guildId: id }, (data) => {
+    state.lastVoiceChannel = null;
     hangUp(true);
     state.guild = data.guild;
     state.me = data.me;
@@ -543,6 +545,7 @@ async function joinVoice(channelId) {
   socket.emit('voice:join', { channelId }, (res) => {
     if (!res) return;
     state.voiceChannel = res.channelId;
+    state.lastVoiceChannel = res.channelId;   // usado para voltar sozinho apos reconexao
     if (state.me) state.me.voiceChannelId = res.channelId;
     $('stage').classList.remove('hidden');
     blip(660, 0.12);
@@ -568,6 +571,7 @@ function hangUp(silent) {
   state.focus = null;
   if (state.me) state.me.voiceChannelId = null;
   if (!silent) {
+    state.lastVoiceChannel = null;
     socket.emit('voice:leave');
     blip(380, 0.16);
   }
@@ -975,10 +979,15 @@ socket.on('disconnect', () => toast('Conexao perdida. Reconectando...', 'warn'))
 socket.on('connect', () => {
   if (state.me) {
     // reentrar apos queda
+    const back = state.lastVoiceChannel;
     socket.emit('join', { name: state.me.name, color: state.me.color, guildId: state.guild.id }, (data) => {
       hangUp(true);
       applyJoin(data);
-      toast('Reconectado');
+      state.lastVoiceChannel = back;
+      // a funcao serverless recicla a conexao de tempos em tempos:
+      // volta para a call sozinho em vez de largar o usuario fora dela
+      if (back) setTimeout(() => joinVoice(back), 300);
+      toast(back ? 'Reconectado - voltando para a call' : 'Reconectado');
     });
   }
 });
