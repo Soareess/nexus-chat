@@ -1,7 +1,8 @@
 /**
  * Sinalizacao rodando como Vercel Function com WebSocket (Fluid compute).
- * A funcao e servida em /api/socket-io, entao o cliente usa
- * path: "/api/socket-io/socket.io" e transporte websocket puro.
+ * A funcao e servida em /api/socket-io, e so esse caminho e roteado ate ela.
+ * Por isso o proprio Socket.IO usa path: "/api/socket-io", com websocket puro
+ * (long-polling precisaria de sticky session entre instancias).
  */
 const http = require('http');
 const { Server } = require('socket.io');
@@ -13,7 +14,7 @@ const server = http.createServer((_req, res) => {
 });
 
 const io = new Server(server, {
-  path: '/api/socket-io/socket.io',
+  path: '/api/socket-io',
   transports: ['websocket'],
   cors: { origin: '*' },
   maxHttpBufferSize: 1e6,

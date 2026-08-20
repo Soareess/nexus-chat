@@ -30,7 +30,7 @@ module.exports = (req, res) => {
     iceServers,
     signalUrl,
     // servidor proprio usa o caminho padrao; na Vercel a funcao fica sob /api/socket-io
-    socketPath: signalUrl ? '/socket.io' : '/api/socket-io/socket.io',
+    socketPath: signalUrl ? '/socket.io' : '/api/socket-io',
     transports: signalUrl ? ['websocket', 'polling'] : ['websocket']
   });
 };
