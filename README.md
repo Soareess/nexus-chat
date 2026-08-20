@@ -58,15 +58,23 @@ O projeto já está publicado no Vercel: a interface **e** a sinalização rodam
 
 O Vercel passou a suportar WebSocket em Functions (Fluid compute), então `api/socket-io.js` sobe como função WebSocket em `/api/socket-io` e `api/config.js` responde em `/ice` dizendo ao cliente onde conectar. Nada extra para configurar — todo push na `main` vira um deploy novo.
 
-### Limites do WebSocket no Vercel
+### A call não tem prazo de validade
 
-| Limite | O que acontece | Como fica |
-|---|---|---|
-| A função tem duração máxima (`maxDuration: 300`) | o WebSocket cai a cada ~5 min | o cliente reconecta e **volta sozinho para a call**; a mídia é P2P, então a conversa em andamento não cai junto |
-| Uma reconexão pode cair em outra instância | quem reconectar primeiro pode não enxergar quem ainda está na instância antiga | some sozinho quando todos reconectam; num grupo pequeno é raro incomodar |
-| Estado (usuários, chat) fica em memória | reciclou a função, o histórico do chat some | as chamadas e a presença se refazem sozinhas |
+A chamada **não depende** do servidor de sinalização depois que começa:
 
-Para calls longas ou grupos maiores, vale um servidor dedicado — sem limite de duração e com estado estável.
+- Cada pessoa tem um **id fixo** guardado no navegador. Se a conexão cair, ela volta como a mesma pessoa — ninguém é removido da call.
+- Assim que a conexão P2P sobe, abre-se um **DataChannel** entre os participantes. Ligar/desligar tela, câmera e mudo passam a viajar por ele, direto de um navegador ao outro. Dá para começar e parar de transmitir a tela com o servidor **inteiramente fora do ar**.
+- O servidor guarda 45 segundos de carência antes de anunciar que alguém saiu, então a reciclagem da função serverless passa despercebida.
+- Só a **entrada** de alguém novo na call precisa do servidor.
+
+Na prática: dá para ficar horas em call transmitindo tela, mesmo com a função do Vercel reciclando a conexão a cada ~5 minutos.
+
+### O que ainda depende do servidor no Vercel
+
+| Situação | Efeito |
+|---|---|
+| Alguém novo entra bem na hora em que a função reciclou | pode cair numa instância diferente e não enxergar a call; basta recarregar a página |
+| A função recicla | o histórico do chat (que fica em memória) se perde; a call continua |
 
 ### Servidor dedicado (opcional)
 
@@ -116,7 +124,9 @@ Serviços prontos: Metered, Twilio Network Traversal, Cloudflare Calls. Ou um `c
 | Tela cheia | duplo clique no quadro, ou botão **Tela cheia** |
 | Sair da call | botão **Sair** |
 
-**Áudio do sistema:** no Chrome/Edge, ao escolher "Guia do Chrome" ou "Janela", aparece a opção *Compartilhar áudio*. No Firefox e no Safari só vai vídeo. No Windows, compartilhar a **tela inteira** não captura áudio — use janela ou aba.
+**Áudio do sistema:** no Chrome/Edge, ao escolher "Guia do Chrome" ou "Janela", marque *Compartilhar áudio* na própria janela de seleção — sem isso o navegador não entrega faixa de áudio nenhuma e a plataforma avisa na tela. No Firefox e no Safari só vai vídeo. No Windows, compartilhar a **tela inteira** normalmente não captura áudio — use aba ou janela.
+
+O áudio da tela vai em faixa separada, a 128 kbps (som de jogo e música soam bem melhor que os ~32 kbps de voz), e toca num elemento de áudio próprio — o `<video>` do Chrome ignora faixa de áudio que chega depois da imagem, que é o motivo clássico de "a transmissão está muda".
 
 ## Arquitetura
 

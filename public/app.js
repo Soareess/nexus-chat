@@ -51,6 +51,16 @@ const state = {
      1. ?signal=https://...   2. o que foi salvo no navegador
      3. o que o backend devolve em /ice   4. mesma origem
 */
+// Identidade fixa da pessoa (nao muda quando o socket cai e volta).
+const clientId = (() => {
+  let id = localStorage.getItem('nexus:cid');
+  if (!id) {
+    id = (crypto.randomUUID ? crypto.randomUUID() : Date.now() + '-' + Math.random().toString(36).slice(2));
+    localStorage.setItem('nexus:cid', id);
+  }
+  return id;
+})();
+
 let socket = null;
 let signalOrigin = '';
 let socketOpts = { transports: ['websocket', 'polling'] };
@@ -82,6 +92,9 @@ function connect(url) {
   else localStorage.removeItem('nexus:signal');
   const opts = { ...socketOpts };
   if (signalOrigin) { delete opts.path; opts.transports = ['websocket', 'polling']; }
+  opts.reconnectionDelay = 400;
+  opts.reconnectionDelayMax = 2500;
+  opts.timeout = 8000;
   socket = signalOrigin ? io(signalOrigin, opts) : io(opts);
   bindSocketEvents();
 }
@@ -193,20 +206,21 @@ function doLogin() {
     return;
   }
 
-  socket.emit('join', { name, color: chosenColor, guildId: 'geral' }, (data) => {
+  socket.emit('join', { clientId, name, color: chosenColor, guildId: 'geral' }, (data) => {
     applyJoin(data);
     $('login').classList.add('hidden');
     $('app').classList.remove('hidden');
   });
 }
 
-function applyJoin(data) {
+function applyJoin(data, opts) {
+  const keep = opts && opts.keepCall;
   state.me = data.me;
   state.guilds = data.guilds;
   state.guild = data.guild;
   state.users = new Map(data.users.map((u) => [u.id, u]));
   state.users.set(state.me.id, state.me);
-  state.textChannel = data.guild.textChannels[0].id;
+  if (!keep) state.textChannel = data.guild.textChannels[0].id;
   renderRail();
   renderGuild();
   renderMe();
@@ -384,27 +398,38 @@ function sysMessage(text) {
 
 /** Um peer = uma conexao P2P com outra pessoa da call. */
 class Peer {
-  constructor(id, polite) {
+  constructor(id) {
     this.id = id;
-    this.polite = polite;
+    // quem tem o id "menor" cede em caso de colisao - regra igual dos dois lados
+    this.polite = String(state.me.id) < String(id);
     this.makingOffer = false;
     this.ignoreOffer = false;
+    this.pending = false;   // negociacao adiada, refeita ao voltar para "stable"
     this.senders = { mic: null, cam: null, screen: null, screenAudio: null };
     this.pc = new RTCPeerConnection(ICE);
 
-    this.pc.onicecandidate = (e) => {
-      if (e.candidate) socket.emit('signal', { to: id, data: { candidate: e.candidate } });
+    // Canal de dados negociado nos dois lados com o mesmo id: assim que a
+    // conexao P2P sobe, toda renegociacao (ligar tela, camera, mute) passa a
+    // viajar por aqui - sem depender do servidor de sinalizacao.
+    this.dc = this.pc.createDataChannel('nx', { negotiated: true, id: 0 });
+    this.dc.onmessage = (e) => {
+      let msg;
+      try { msg = JSON.parse(e.data); } catch (_) { return; }
+      handlePeerMessage(this.id, msg);
     };
 
-    this.pc.onnegotiationneeded = async () => {
-      try {
-        this.makingOffer = true;
-        await this.pc.setLocalDescription();
-        socket.emit('signal', { to: id, data: { description: this.pc.localDescription } });
-      } catch (err) {
-        console.warn('negotiation', err);
-      } finally {
-        this.makingOffer = false;
+    this.pc.onicecandidate = (e) => {
+      if (e.candidate) this.send('signal', { candidate: e.candidate });
+    };
+
+    this.pc.onnegotiationneeded = () => this.negotiate();
+
+    // Se uma negociacao precisou esperar (ou foi descartada numa colisao de
+    // ofertas), ela e refeita assim que a conexao volta para "stable".
+    this.pc.onsignalingstatechange = () => {
+      if (this.pc.signalingState === 'stable' && this.pending) {
+        this.pending = false;
+        this.negotiate();
       }
     };
 
@@ -412,6 +437,7 @@ class Peer {
       const stream = e.streams[0];
       if (!stream) return;
       attachRemoteStream(id, stream);
+      stream.onaddtrack = () => { renderStage(); };
       e.track.onended = () => detachRemoteStream(id, stream.id);
       stream.onremovetrack = () => {
         if (stream.getTracks().length === 0) detachRemoteStream(id, stream.id);
@@ -456,12 +482,41 @@ class Peer {
       const a = state.local.screen.getAudioTracks()[0];
       if (a && !this.senders.screenAudio) {
         this.senders.screenAudio = this.pc.addTrack(a, state.local.screen);
+        // som de jogo/musica merece mais que os ~32kbps de voz
+        applyBitrate(this.senders.screenAudio, 128000, true);
       }
     }
   }
 
+  async negotiate() {
+    if (this.pc.signalingState !== 'stable') { this.pending = true; return; }
+    try {
+      this.makingOffer = true;
+      await this.pc.setLocalDescription();
+      this.send('signal', { description: this.pc.localDescription });
+    } catch (err) {
+      console.warn('negotiation', err);
+      this.pending = true;
+    } finally {
+      this.makingOffer = false;
+    }
+  }
+
+  /** manda pelo DataChannel; se ainda nao abriu, vai pelo servidor */
+  send(type, data) {
+    if (this.dc && this.dc.readyState === 'open') {
+      try { this.dc.send(JSON.stringify({ t: type, d: data })); return true; } catch (_) {}
+    }
+    if (!socket) return false;
+    // sem canal de dados, offer/answer/meta voltam a passar pelo servidor
+    if (type === 'signal') socket.emit('signal', { to: this.id, data });
+    else if (type === 'meta') socket.emit('media:meta', { to: this.id, ...data });
+    else return false;   // state e speaking sao tratados por broadcastPeers
+    return true;
+  }
+
   sendMeta(streamId, kind) {
-    socket.emit('media:meta', { to: this.id, streamId, kind });
+    this.send('meta', { streamId, kind });
   }
 
   removeKind(kind) {
@@ -480,22 +535,27 @@ class Peer {
   }
 }
 
-function applyBitrate(sender, bitrate) {
+function applyBitrate(sender, bitrate, isAudio) {
   if (!sender) return;
   try {
     const p = sender.getParameters();
     p.encodings = p.encodings && p.encodings.length ? p.encodings : [{}];
     p.encodings[0].maxBitrate = bitrate;
-    p.degradationPreference = 'maintain-resolution';
+    if (!isAudio) p.degradationPreference = 'maintain-resolution';
     sender.setParameters(p);
   } catch (_) { /* nem todo browser aceita */ }
 }
 
 function attachRemoteStream(peerId, stream) {
   const bucket = state.remote.get(peerId) || {};
-  const known = state.pendingKind.get(stream.id);
-  // se o meta ainda nao chegou, deduz pelo tipo de track
-  const kind = known || (stream.getVideoTracks().length ? 'cam' : 'mic');
+  let kind = state.pendingKind.get(stream.id);
+  if (!kind) {
+    // meta ainda nao chegou: deduz pelo tipo de faixa, mas sem derrubar uma
+    // stream diferente que ja esteja ocupando o lugar
+    kind = stream.getVideoTracks().length ? 'cam' : 'mic';
+    const ocupado = bucket[kind] && bucket[kind].id !== stream.id;
+    if (ocupado) kind = kind === 'cam' ? 'screen' : 'mic';
+  }
   bucket[kind] = stream;
   state.remote.set(peerId, bucket);
   renderStage();
@@ -551,7 +611,7 @@ async function joinVoice(channelId) {
     blip(660, 0.12);
     // quem entra manda a offer para os que ja estavam
     res.peers.forEach((p) => {
-      const peer = new Peer(p.id, true);
+      const peer = new Peer(p.id);
       state.peers.set(p.id, peer);
     });
     renderGuild();
@@ -584,7 +644,7 @@ function hangUp(silent) {
 function toggleMic() {
   state.muted = !state.muted;
   if (state.local.mic) state.local.mic.getAudioTracks().forEach((t) => (t.enabled = !state.muted));
-  socket.emit('state:update', { muted: state.muted });
+  broadcastPeers('state', { muted: state.muted });
   renderMe();
   renderControls();
   renderGuild();
@@ -594,7 +654,7 @@ function toggleDeafen() {
   state.deafened = !state.deafened;
   if (state.deafened && !state.muted) toggleMic();
   document.querySelectorAll('audio.remote, video.remote').forEach((el) => { el.muted = state.deafened; });
-  socket.emit('state:update', { deafened: state.deafened });
+  broadcastPeers('state', { deafened: state.deafened });
   renderMe();
   renderControls();
   renderGuild();
@@ -610,7 +670,7 @@ async function startCam() {
     state.local.cam = stream;
     stream.getVideoTracks()[0].onended = () => stopCam();
     state.peers.forEach((p) => p.syncLocalTracks());
-    socket.emit('state:update', { cam: true });
+    broadcastPeers('state', { cam: true });
     renderStage();
     renderControls();
   } catch (err) {
@@ -627,7 +687,7 @@ function stopCam(silent) {
     p.removeKind('cam');
     socket.emit('media:meta', { to: p.id, streamId: id, kind: 'stop' });
   });
-  if (!silent) socket.emit('state:update', { cam: false });
+  if (!silent) broadcastPeers('state', { cam: false });
   renderStage();
   renderControls();
 }
@@ -658,11 +718,17 @@ async function startScreen() {
     track.onended = () => stopScreen();
 
     state.peers.forEach((p) => p.syncLocalTracks());
-    socket.emit('state:update', { screen: true });
+    broadcastPeers('state', { screen: true });
     state.focus = 'local:screen';
     renderStage();
     renderControls();
-    toast('Voce esta compartilhando sua tela');
+    if (wantAudio && stream.getAudioTracks().length === 0) {
+      toast('Tela sem audio: na janela do navegador marque "Compartilhar audio da guia" e escolha uma ABA ou JANELA.', 'warn');
+    } else if (stream.getAudioTracks().length) {
+      toast('Compartilhando tela com audio');
+    } else {
+      toast('Voce esta compartilhando sua tela');
+    }
   } catch (err) {
     if (err.name !== 'NotAllowedError') toast('Nao deu para compartilhar: ' + err.message, 'err');
   }
@@ -678,7 +744,7 @@ function stopScreen(silent) {
     socket.emit('media:meta', { to: p.id, streamId: id, kind: 'stop' });
   });
   if (state.focus === 'local:screen') state.focus = null;
-  if (!silent) socket.emit('state:update', { screen: false });
+  if (!silent) broadcastPeers('state', { screen: false });
   renderStage();
   renderControls();
 }
@@ -704,7 +770,7 @@ function watchSpeaking(stream) {
         if (state.me) {
           if (now) state.speaking.add(state.me.id); else state.speaking.delete(state.me.id);
         }
-        socket.emit('voice:speaking', { speaking: now });
+        broadcastPeers('speaking', { speaking: now });
         paintSpeaking();
       }
     }, 220);
@@ -779,8 +845,8 @@ function renderStage() {
         el.appendChild(video);
       }
       if (video.srcObject !== t.stream) video.srcObject = t.stream;
-      // audio proprio nunca toca de volta (evita eco); tela alheia toca o som do sistema
-      video.muted = t.mine ? true : state.deafened;
+      // todo o audio sai pelos elementos <audio>; o video fica mudo para nao dobrar
+      video.muted = true;
       if (t.mine && t.kind === 'cam') video.style.transform = 'scaleX(-1)';
       const p = video.play();
       if (p && p.catch) p.catch(() => {});
@@ -828,23 +894,33 @@ function syncRemoteAudio() {
     holder.style.display = 'none';
     document.body.appendChild(holder);
   }
+
   const wanted = new Set();
   state.remote.forEach((bucket, peerId) => {
-    if (!bucket.mic) return;
-    const id = 'a-' + peerId;
-    wanted.add(id);
-    let a = document.getElementById(id);
-    if (!a) {
-      a = document.createElement('audio');
-      a.id = id;
-      a.autoplay = true;
-      a.className = 'remote';
-      holder.appendChild(a);
-    }
-    if (a.srcObject !== bucket.mic) a.srcObject = bucket.mic;
-    a.muted = state.deafened;
-    const p = a.play();
-    if (p && p.catch) p.catch(() => {});
+    // microfone e audio da tela: cada faixa ganha seu proprio elemento, com uma
+    // MediaStream so dela. O Chrome ignora faixa de audio adicionada a uma
+    // stream que ja estava tocando, e era por isso que a tela vinha muda.
+    ['mic', 'screen'].forEach((kind) => {
+      const stream = bucket[kind];
+      if (!stream) return;
+      stream.getAudioTracks().forEach((track) => {
+        const id = 'a-' + peerId + '-' + track.id;
+        wanted.add(id);
+        let a = document.getElementById(id);
+        if (!a) {
+          a = document.createElement('audio');
+          a.id = id;
+          a.autoplay = true;
+          a.className = 'remote';
+          a.srcObject = new MediaStream([track]);
+          holder.appendChild(a);
+        }
+        a.muted = state.deafened;
+        a.volume = 1;
+        const pr = a.play();
+        if (pr && pr.catch) pr.catch(() => {});
+      });
+    });
   });
   [...holder.children].forEach((el) => { if (!wanted.has(el.id)) el.remove(); });
 }
@@ -861,13 +937,11 @@ function renderControls() {
   $('cHang').querySelector('.ci').innerHTML = icon('hang');
 }
 
-/* --------------------------------------------------------------- signaling */
-function bindSocketEvents() {
-socket.on('signal', async ({ from, data }) => {
+/* ------------------------------------------- tratamento de mensagens P2P */
+async function handleSignal(from, data) {
   let peer = state.peers.get(from);
   if (!peer) {
-    // quem ja estava na sala responde: entra como "polite"
-    peer = new Peer(from, false);
+    peer = new Peer(from);
     state.peers.set(from, peer);
     renderStage();
   }
@@ -878,11 +952,13 @@ socket.on('signal', async ({ from, data }) => {
         data.description.type === 'offer' && (peer.makingOffer || pc.signalingState !== 'stable');
       peer.ignoreOffer = !peer.polite && offerCollision;
       if (peer.ignoreOffer) return;
+      // cedendo: a nossa oferta e descartada, entao remarcamos a renegociacao
+      if (offerCollision && peer.polite) peer.pending = true;
 
       await pc.setRemoteDescription(data.description);
       if (data.description.type === 'offer') {
         await pc.setLocalDescription();
-        socket.emit('signal', { to: from, data: { description: pc.localDescription } });
+        peer.send('signal', { description: pc.localDescription });
       }
     } else if (data.candidate) {
       try { await pc.addIceCandidate(data.candidate); }
@@ -891,9 +967,9 @@ socket.on('signal', async ({ from, data }) => {
   } catch (err) {
     console.warn('signal error', err);
   }
-});
+}
 
-socket.on('media:meta', ({ from, streamId, kind }) => {
+function handleMeta(from, streamId, kind) {
   if (kind === 'stop') {
     detachRemoteStream(from, streamId);
     state.pendingKind.delete(streamId);
@@ -905,15 +981,51 @@ socket.on('media:meta', ({ from, streamId, kind }) => {
   if (bucket) {
     Object.keys(bucket).forEach((k) => {
       if (bucket[k] && bucket[k].id === streamId && k !== kind) {
-        const s = bucket[k];
+        const st = bucket[k];
         delete bucket[k];
-        bucket[kind] = s;
+        bucket[kind] = st;
       }
     });
     state.remote.set(from, bucket);
     renderStage();
   }
-});
+}
+
+/** mensagens que chegam pelo DataChannel (funcionam com o servidor fora do ar) */
+function handlePeerMessage(from, msg) {
+  if (!msg || !msg.t) return;
+  if (msg.t === 'signal') return handleSignal(from, msg.d || {});
+  if (msg.t === 'meta') return handleMeta(from, msg.d.streamId, msg.d.kind);
+  if (msg.t === 'state') {
+    const u = state.users.get(from);
+    if (u) { state.users.set(from, { ...u, ...msg.d }); renderGuild(); renderMembers(); renderStage(); }
+    return;
+  }
+  if (msg.t === 'speaking') return setSpeaking(from, !!msg.d.speaking);
+}
+
+function setSpeaking(id, on) {
+  if (on) state.speaking.add(id); else state.speaking.delete(id);
+  document.querySelectorAll('.tile[data-owner="' + id + '"]').forEach((el) => el.classList.toggle('speaking', on));
+  renderGuild();
+}
+
+/** avisa todo mundo da call: pelo DataChannel quando der, senao pelo servidor */
+function broadcastPeers(type, data) {
+  let precisaServidor = state.peers.size === 0;
+  state.peers.forEach((p) => {
+    if (p.dc && p.dc.readyState === 'open') p.send(type, data);
+    else precisaServidor = true;
+  });
+  // o servidor guarda o estado tambem para quem esta fora da call (sidebar)
+  if (type === 'state') socket.emit('state:update', data);
+  else if (precisaServidor) socket.emit('voice:speaking', data);
+}
+
+/* --------------------------------------------------------------- signaling */
+function bindSocketEvents() {
+socket.on('signal', ({ from, data }) => handleSignal(from, data));
+socket.on('media:meta', ({ from, streamId, kind }) => handleMeta(from, streamId, kind));
 
 socket.on('voice:joined', (user) => {
   state.users.set(user.id, user);
@@ -953,11 +1065,7 @@ socket.on('user:update', (user) => {
   renderStage();
 });
 
-socket.on('voice:speaking', ({ id, speaking }) => {
-  if (speaking) state.speaking.add(id); else state.speaking.delete(id);
-  document.querySelectorAll('.tile[data-owner="' + id + '"]').forEach((el) => el.classList.toggle('speaking', speaking));
-  renderGuild();
-});
+socket.on('voice:speaking', ({ id, speaking }) => setSpeaking(id, speaking));
 
 socket.on('chat:message', (m) => {
   if (!state.guild.messages) state.guild.messages = {};
@@ -977,20 +1085,51 @@ socket.on('chat:typing', ({ channelId, name }) => {
 
 socket.on('disconnect', () => toast('Conexao perdida. Reconectando...', 'warn'));
 socket.on('connect', () => {
-  if (state.me) {
-    // reentrar apos queda
-    const back = state.lastVoiceChannel;
-    socket.emit('join', { name: state.me.name, color: state.me.color, guildId: state.guild.id }, (data) => {
-      hangUp(true);
-      applyJoin(data);
-      state.lastVoiceChannel = back;
-      // a funcao serverless recicla a conexao de tempos em tempos:
-      // volta para a call sozinho em vez de largar o usuario fora dela
-      if (back) setTimeout(() => joinVoice(back), 300);
-      toast(back ? 'Reconectado - voltando para a call' : 'Reconectado');
-    });
-  }
+  if (!state.me) return;
+  // Reentra com o MESMO clientId: o servidor devolve a call em que a pessoa
+  // estava e as conexoes P2P que ja existem seguem intactas - a tela nao pisca.
+  const back = state.lastVoiceChannel;
+  socket.emit('join', { clientId, name: state.me.name, color: state.me.color, guildId: state.guild.id }, (data) => {
+    applyJoin(data, { keepCall: true });
+    state.lastVoiceChannel = back || state.voiceChannel;
+    resumeVoice(data.voice, back);
+  });
 });
+
+/**
+ * Depois de reconectar: mantem quem ja esta conectado e so abre conexao com
+ * quem faltar. Ninguem e derrubado - a midia continua correndo pelo P2P.
+ */
+function resumeVoice(voice, fallbackChannel) {
+  const channelId = (voice && voice.channelId) || fallbackChannel;
+  if (!channelId) return;
+
+  if (!voice) {
+    // o servidor perdeu o estado (instancia nova): entra de novo no canal
+    socket.emit('voice:join', { channelId }, (res) => {
+      if (!res) return;
+      state.voiceChannel = res.channelId;
+      if (state.me) state.me.voiceChannelId = res.channelId;
+      res.peers.forEach((pu) => {
+        state.users.set(pu.id, pu);
+        if (!state.peers.has(pu.id)) state.peers.set(pu.id, new Peer(pu.id));
+      });
+      renderGuild();
+      renderStage();
+    });
+    return;
+  }
+
+  state.voiceChannel = channelId;
+  if (state.me) state.me.voiceChannelId = channelId;
+  voice.peers.forEach((pu) => {
+    state.users.set(pu.id, pu);
+    if (!state.peers.has(pu.id)) state.peers.set(pu.id, new Peer(pu.id));
+  });
+  $('stage').classList.remove('hidden');
+  renderGuild();
+  renderStage();
+}
 
 socket.on('connect_error', (err) => {
   if (state.me) return;
@@ -1062,7 +1201,9 @@ function bindUI() {
     if (e.key === 'Escape' && state.focus) { state.focus = null; renderStage(); }
   });
 
-  window.addEventListener('beforeunload', () => socket.emit('voice:leave'));
+  const despedir = () => { try { socket.emit('voice:leave'); socket.emit('bye'); } catch (_) {} };
+  window.addEventListener('beforeunload', despedir);
+  window.addEventListener('pagehide', despedir);
 }
 
 (async function boot() {
